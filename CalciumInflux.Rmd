@@ -1,0 +1,1245 @@
+---
+title: "CalciumInflux"
+output: html_notebook
+---
+
+This is a script to convert raw photon counting data from 96-well plates into 6 types of graphs. 
+Most appropriate data source for these graphs is from Varioskan plate reader experiments.
+
+1. Line graph comparing relative light units vs time.
+2. Comparison of treatments to respective mock controls (if many treatments with equal number of mocks).
+3. Cumulative RLU between treatments (any user defined factor): Within the user defined time scale
+  a. Statistics for comparing factors.
+4. Ratio of RLU to baseline/background RLU (If high background RLU is affecting experiment).
+  a. Must have additional photon baseline data for this (data recorded before addition of .
+5. L/Lmax calcium discharge graph.
+  a. Must have additional calcium discharge data for this.
+*In each, choose between randomly generated table or your own excel dataframe (script to extract is given)
+
+```{r}
+install.packages("dplyr")
+install.packages("ggplot2")
+install.packages("tidyr")
+install.packages("readxl")
+install.packages("forcats")
+install.packages("agricolae")
+install.packages("emmeans")
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readxl)
+library(forcats)
+library(agricolae)
+library(emmeans)
+```
+######################## 1. Standard RLU Plot##############################
+
+```{r}
+##Creating an random table with a fake RLU curve for script testing##
+set.seed(123)
+datarand <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(70, 75, 90, 120, 180, 250, 290, 240, 90, 85, 71)
+datarand[8:20, 26:47] <- rep(wave_sequence, each = 1, length.out = 13) 
+dfrand <- as.data.frame(datarand)
+colnames(dfrand) <- 1:96
+rownames(dfrand) <- 1:60
+dfrand$Frame <- 1:60
+dfrand <- dfrand[, c("Frame", colnames(dfrand)[1:96])]
+head(dfrand)
+```
+
+
+
+```{r}
+##Reading Excel file directly from Varioskan Excel results
+##Label your Excel file "data"
+##If not from Varioskan output: data should start on 10th row with column headers (Frame, 1, 2, 3,...), then with data points (rows) until around 60 frames ( =< 60 >= ). Column headers can go to a maximum of 96 (=< 96).
+DFup <- "data.xlsx"
+DF1 <- read_excel(DFup, sheet = 2, skip = 9)
+DF1 <- DF1[,-2] 
+DF1 <- DF1[,-98] 
+DF1 <- DF1 %>%
+  slice(-c(82:86)) 
+colnames(DF1) <- c("Frame", 1:96) 
+head(DF1)
+```
+1. Line graph comparing relative light units vs time
+
+```{r}
+##Convert Photek dataframe to new organised dataframe
+##Change dataframe depending if you use the random dataset "dfrand" or your own dataset from Excel "DF1".
+df_long <- pivot_longer(dfrand, 
+                        cols = -Frame,  
+                        names_to = "Well", 
+                        values_to = "RLU")
+
+df_long <- df_long %>%
+  arrange(Well)
+```
+
+```{r}
+##Assign variable names according to your experiment in "". 
+##gene variable can also be cell line, or plant species. Treatment is what you add to test and compare between gene/cell line/plant species. You can add or remove these variables
+
+fctr1 <- "control"
+fctr2 <- "mutant"
+
+treatment1 <- "mock"
+treatment2 <- "treatment"
+
+```
+
+
+```{r}
+##Step to add new columns for factor and Treatment variables
+##IMPORTANT: Adjust well ranges and factor/treatment to your experiment
+
+
+##Make factor column
+
+##Function to assign factor values based on well allocation (ranges)
+assign_factor <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(fctr = if_else(Well %in% start:end, value, fctr))
+  return(df)
+}
+
+df_long <- df_long %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_factor) {
+  df_long <- assign_factor(df_long, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+##Define a function to assign treatments based on well allocation (ranges)
+assign_treatment <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(treatment = if_else(Well %in% start:end, value, treatment))
+  return(df)
+}
+
+
+df_long <- df_long %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_treatment) {
+  df_long <- assign_treatment(df_long, i$start, i$end, i$value)
+}
+```
+
+
+
+```{r}
+##Group by factor, treatment, and frame. Then calculate the average, standard deviation, and standard error for each group. The clean up table for any NAs.
+data_summary <- df_long %>%
+  group_by(fctr, treatment, Frame) %>%
+  summarise(average_value = mean(RLU, na.rm = TRUE),
+            standard_deviation = sd(RLU, na.rm = TRUE),
+            Standard_error = sd(RLU, na.rm = TRUE) / sqrt(n())
+            )
+data_summary <- data_summary[complete.cases(data_summary$fctr,data_summary$treatment),]
+```
+
+```{r}
+## Convert Frame to factor to ensure proper ordering on the x-axis
+data_summary$fctr <- as.factor(data_summary$fctr)
+data_summary$treatment <- as.factor(data_summary$treatment)
+```
+
+
+
+```{r}
+
+##Preparations for plot
+filfctr <- data_summary 
+
+filfctr$fctr <- factor(filfctr$fctr, levels = c(fctr1, fctr2))
+  
+filfctr$Frame <- as.numeric(as.character(filfctr$Frame))
+
+## Plot
+plot <- ggplot(filfctr, aes(x = Frame, y = average_value, color = treatment, group = treatment)) +
+  geom_point(size = 1.5) +  
+  geom_line() +  
+  geom_errorbar(aes(ymin = average_value - Standard_error, ymax = average_value + Standard_error), width = 0.1) +  
+  scale_color_manual(values = setNames(c("#bcb8b1", "#00b4d8"), c(treatment1, treatment2))) +  # Customize colors using hex code
+  labs(x = "Time (min)", y = "Cytoplasmic calcium influx (RLU min-1)", color = "Treatment") +
+  ggtitle("Experiment Title") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.y = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 13),
+    axis.line = element_line(color = "black"),
+    plot.background = element_rect(fill = "white"),  
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11.5),  
+    panel.grid.major.x = element_line(color = "black", linetype = "dotted"), 
+    panel.grid.minor = element_blank()  
+  ) +
+    scale_x_continuous(
+      breaks = seq(0, max(filfctr$Frame), by = 10),  
+      labels = function(x) x * 30 / 60,  # Convert frame number to minutes (If 1 frame = 30 seconds, change if not)
+      expand = c(0, 0)
+      ) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  facet_wrap(~ fctr, ncol = 2, nrow = 1) #Remove this line if only 1 factor
+
+ggsave("Plot.png", plot, width = 6, height = 5, dpi = 300)
+```
+
+
+######################### 2.Comparison to Controls Only Plot##########################################
+
+
+```{r}
+##Creating an random table for script testing##
+set.seed(123)
+datarandComp <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(70, 75, 90, 120, 180, 250, 290, 240, 90, 85, 71)
+datarandComp[8:20, 37:48] <- rep(wave_sequence, each = 1, length.out = 13) 
+dfrandComp <- as.data.frame(datarandComp)
+colnames(dfrandComp) <- 1:96
+rownames(dfrandComp) <- 1:60
+dfrandComp$Frame <- 1:60
+dfrandComp <- dfrandComp[, c("Frame", colnames(dfrandComp)[1:96])]
+head(dfrandComp)
+```
+
+```{r}
+##Reading Excel file directly from Varioskan Excel results
+##Label your Excel file "data"
+##If not from Varioskan output: data should start on 10th row with column headers (Frame, 1, 2, 3,...), then with data points (rows) until around 60 frames ( =< 60 >= ). Column headers can go to a maximum of 96 (=< 96).
+DFup <- "data.xlsx"
+DF1 <- read_excel(DFup, sheet = 2, skip = 9)
+DF1 <- DF1[,-2] 
+DF1 <- DF1[,-98] 
+DF1 <- DF1 %>%
+  slice(-c(82:86)) 
+colnames(DF1) <- c("Frame", 1:96) 
+head(DF1)
+```
+
+```{r}
+##Proceed if you have two control treatments associated with 2 other treatments. 
+##Same method as RLU graph (1)
+
+##Change dataframe depending if you use the random dataset "dfrand" or your own dataset from Excel.
+df_long <- pivot_longer(dfrandComp, 
+                        cols = -Frame,  # Specify the column to keep as identifier
+                        names_to = "Well",  # Name of the new column for column names
+                        values_to = "RLU") # Name of the new column for values
+
+df_long <- df_long %>%
+  arrange(Well)
+```
+
+```{r}
+#Assign variable names according to your experiment in "". 
+##Factor variable can also be cell line, or plant species. Treatment is what you add to test and compare between factor like gene/cell line/plant species. You can add or remove these variables
+
+fctr1 <- "control"
+fctr2 <- "mutant"
+
+treatment1 <- "mock1"
+treatment2 <- "treatment1"
+treatment3 <- "mock2"  #Asign second mock
+treatment4 <- "treatment2" # asign second treatment
+
+```
+
+
+```{r}
+##Step to add new columns for factor and Treatment variables
+##IMPORTANT: Adjust well ranges and factor/treatment to your experiment
+
+
+##Make factor column
+
+##Function to assign factor values based on well allocation (ranges)
+assign_factor <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(fctr = if_else(Well %in% start:end, value, fctr))
+  return(df)
+}
+
+df_long2 <- df_long %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+##ADJUSTING LIST HERE AS EXAMPLE TO HAVE EACH FACTOR ENCOUNTER EACH TREATMENT ATLEAST ONCE
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_factor) {
+  df_long2 <- assign_factor(df_long2, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+##Define a function to assign treatments based on well allocation (ranges)
+assign_treatment <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(treatment = if_else(Well %in% start:end, value, treatment))
+  return(df)
+}
+
+
+df_long2 <- df_long2 %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 12, value = treatment1),
+  list(start = 13, end = 24, value = treatment2),
+  list(start = 25, end = 36, value = treatment3),
+  list(start = 37, end = 48, value = treatment4),
+  list(start = 49, end = 60, value = treatment1),
+  list(start = 61, end = 72, value = treatment2),
+  list(start = 73, end = 84, value = treatment3),
+  list(start = 85, end = 96, value = treatment4)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_treatment) {
+  df_long2 <- assign_treatment(df_long2, i$start, i$end, i$value)
+}
+```
+
+```{r}
+##Group by factor, treatment, and frame. Then calculate the average, standard deviation, and standard error for each group. Columns with NAs also cleaned.
+data_summary2 <- df_long2 %>%
+  group_by(fctr, treatment, Frame) %>%
+  summarise(average_value = mean(RLU, na.rm = TRUE),
+            standard_deviation = sd(RLU, na.rm = TRUE),
+            Standard_error = sd(RLU, na.rm = TRUE) / sqrt(n())
+            )
+data_summary2 <- data_summary2[complete.cases(data_summary2$fctr,data_summary2$treatment),]
+```
+
+```{r}
+##Creating new dataframe with value difference between two treatments.
+
+data_summary2$Frame <- as.factor(data_summary2$Frame) 
+data_summary2 <- data_summary2[complete.cases(data_summary2),]
+data_summary2$Frame <- as.factor(data_summary2$Frame)
+
+
+data_summary2$Frame <- as.factor(data_summary2$Frame)
+
+# Create a new column that combines factor and Frame values
+data_summary2 <- data_summary2 %>%
+  select(-c(5,6)) %>%
+  pivot_wider(
+    names_from = treatment, 
+    values_from = average_value
+  ) %>%
+  mutate(
+    value_difference_treatments1 = treatment1 - mock1,
+    value_difference_treatments2 = treatment2 - mock2
+  )
+
+data_summary2 <- data_summary2[complete.cases(data_summary2),]
+
+
+##Important:If you have some treatments that don't encounter a factor, this will cause an error. If so, assign all NA value as O.
+```
+
+
+```{r}
+
+##Pivot back to single column for RLU difference and treatment name difference
+
+data_summary2.1 <- data_summary2 %>%
+  select(-c(3,4,5,6)) %>%
+  rename(
+    Diff_Treat1_Mock1 = value_difference_treatments1,
+    Diff_Treat2_Mock2 = value_difference_treatments2
+  )
+
+data_summary2.1 <- data_summary2.1 %>%
+  pivot_longer(
+    cols = starts_with("Diff_"), 
+    names_to = "Comparison",                 
+    values_to = "RLU_Diff"                  
+  )
+```
+
+
+
+```{r}
+data_summary2.1$fctr <- as.factor(data_summary2.1$fctr)
+data_summary2.1$Comparison <- as.factor(data_summary2.1$Comparison)
+```
+
+
+
+```{r}
+####Graph for comparison to controls
+
+data_summary2.1$Frame <- as.numeric(as.character(data_summary2.1$Frame))
+
+data_summary2.2 <- data_summary2.1 %>%
+  rename(Factors = fctr)
+
+# Define new limits for the Y-axis
+y_limits <- c(-150, 750)  # Adjust as necessary
+
+
+
+
+## Plot
+plot <- ggplot(data_summary2.2, aes(x = Frame, y = RLU_Diff, color = Comparison, shape = Factors, linetype = Factors)) +
+  geom_point(size = 1.5) +  
+  geom_line() +  
+  scale_color_manual(values = c("Diff_Treat1_Mock1" = "#00b4d8", "Diff_Treat2_Mock2" = "#f6bd60")) +  
+  labs(x = "Time (min)", y = "Cytoplasmic Ca2+ influx (RLU min-1)") +
+  ggtitle("Comparison to controls") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.y = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 13),
+    axis.line = element_line(color = "black"),
+    plot.background = element_rect(fill = "white"),  
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11.5),  
+    panel.grid.major.x = element_line(color = "black", linetype = "dotted"), 
+    panel.grid.minor = element_blank()  
+  ) +
+    scale_x_continuous(
+      breaks = seq(0, max(filfctr$Frame), by = 10),  
+      labels = function(x) x * 30 / 60,  # Convert frame number to minutes (If 1 frame = 30 seconds, change if not)
+      expand = c(0, 0)
+      ) +  
+  scale_y_continuous(expand = c(0, 0))   
+
+ggsave("PlotComparisons.png", plot, dpi = 300)
+```
+
+
+
+################################ 3. Cumulative RLU box and whisker Plot with Statistics ##########################################################
+
+```{r}
+##Creating an random table for script testing##
+set.seed(123)
+datarand <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(70, 75, 90, 120, 180, 250, 290, 240, 90, 85, 71)
+datarand[8:20, 26:47] <- rep(wave_sequence, each = 1, length.out = 13) 
+dfrand <- as.data.frame(datarand)
+colnames(dfrand) <- 1:96
+rownames(dfrand) <- 1:60
+dfrand$Frame <- 1:60
+dfrand <- dfrand[, c("Frame", colnames(dfrand)[1:96])]
+head(dfrand)
+```
+
+```{r}
+##Convert Photek dataframe to new organised dataframe
+##Change dataframe depending if you use the random dataset "dfrand" or your own dataset from Excel "DF1".
+df_long <- pivot_longer(dfrand, 
+                        cols = -Frame,  # Specify the column to keep as identifier
+                        names_to = "Well",  # Name of the new column for column names
+                        values_to = "RLU") # Name of the new column for values
+
+df_long <- df_long %>%
+  arrange(Well)
+```
+
+```{r}
+##Assign variable names according to your experiment in "". 
+##Factor variable can also be cell line, or plant species. Treatment is what you add to test and compare between gene/cell line/plant species. You can add or remove these variables
+
+fctr1 <- "control"
+fctr2 <- "mutant"
+
+treatment1 <- "mock"
+treatment2 <- "treatment"
+```
+
+```{r}
+##Step to add new columns for factor and Treatment variables
+##IMPORTANT: Adjust well ranges and factor/treatment to your experiment
+
+
+##Make factor column
+
+##Function to assign factor values based on well allocation (ranges)
+assign_factor <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(fctr = if_else(Well %in% start:end, value, fctr))
+  return(df)
+}
+
+df_long <- df_long %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_factor) {
+  df_long <- assign_factor(df_long, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+##Define a function to assign treatments based on well allocation (ranges)
+assign_treatment <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(treatment = if_else(Well %in% start:end, value, treatment))
+  return(df)
+}
+
+
+df_long <- df_long %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_treatment) {
+  df_long <- assign_treatment(df_long, i$start, i$end, i$value)
+}
+```
+
+```{r}
+##Filtering data with data from graph 1 (standard RLU graph)
+
+data_summary3 <- df_long %>%
+  filter(Frame >= 0 & Frame <= 10) %>%
+  group_by(fctr, treatment, Well) %>%
+  mutate(cumulative_RLU_Frames = cumsum(RLU)) %>%
+  mutate(cumulative_RLU_Frames = as.numeric(cumulative_RLU_Frames)) %>%
+  summarise(IntegratedRLU = sum(cumulative_RLU_Frames), .groups = 'drop') %>%
+  ungroup()
+
+##Clean columns:
+data_summary3 <- data_summary3[complete.cases(data_summary3$fctr,data_summary3$treatment),]
+```
+
+
+```{r}
+###Reorder treatments
+box1 <- data_summary3 
+
+box1 <- box1 %>%
+  mutate(treatment = case_when(
+    fctr == factor1 ~ fct_relevel(treatment, "mock", "treatment"),
+    fctr == factor2 ~ fct_relevel(treatment, "mock", "treatment"),
+    TRUE ~ treatment  
+  ))
+
+# Create a boxplot with the filtered data, grouped by factor and treatment
+boxplot1 <- ggplot(box1, aes(x = fctr, y = IntegratedRLU, color = factor(treatment, levels = c("mock", "treatment")))) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75), size = 0.75, alpha = 0.7) +
+  stat_summary(data = box1, fun.data = "mean_se", geom = "errorbar", width = 0.2, aes(group = interaction(fctr, treatment)), size = 0.5, position = position_dodge(width = 0.75)) +  
+  stat_summary(data = box1, fun = mean, geom = "point", size = 2, aes(group = interaction(fctr, treatment)), position = position_dodge(width = 0.75)) +  
+  geom_vline(xintercept = seq(0.5, length(unique(box1$fctr)) + 0.5, by = 1), linetype = "dotted", color = "black") + 
+  scale_color_manual(values = c("mock" = "#bcb8b1", "treatment" = "#e63946")) +
+  scale_y_continuous(labels = scales::label_number(scale = 1/1000), breaks = seq(0, max(box1$IntegratedRLU), by = 0.5 * 10^2) # Change scale depending on your data
+   )+
+  labs(x = "Factor", y = "IntegratedRLU (× 10^3)", color = "treatment") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    axis.line = element_line(color = "black"),
+    plot.background = element_rect(fill = "white"),  
+    axis.text.x = element_text(angle = 45, hjust = 1,size = 12),  
+    panel.grid.minor = element_blank())  
+
+
+ggsave("plotIntegrated.png", plot = boxplot1, width = 5, height = 5, dpi = 300)
+```
+
+```{r}
+##Statistics
+##Simple ANOVA for the previous boxplot
+
+box_factor <- data_summary3 
+anova_box1 <- aov(IntegratedRLU ~ treatment, data = box_factor)
+summary(anova_box1)
+tukey_result <- TukeyHSD(anova_box1)
+print(tukey_result)
+
+```
+
+```{r}
+##Generalised linear model (GLM) analysis with ANOVA and Residuals
+
+
+model <- glm(log10(IntegratedRLU) ~ fctr + treatment, data = box1, family = gaussian()) #Adjust equation here depending on factors you want to compare and if they interact or not with "*" or "+"
+summary(model)
+
+anova_results <- anova(model)
+print(anova_results)
+
+##This makes residual plots of GLM. Check if residuals are normally distributed. If not, transform the data 
+par(mfrow = c(2, 2))
+plot(model)
+title("Residuals vs Fitted")
+title("Normal Q-Q")
+
+##Proceed to next step if happy with model
+```
+
+```{r}
+##Pairwise comparison and significance levels
+
+HSDresults <- emmeans(model, ~ fctr * treatment)
+specific_fctr_contrasts <- contrast(HSDresults, method = "pairwise")
+summary(specific_fctr_contrasts)
+```
+
+```{r}
+##If issues with statistics because of absent values: below checks count number of each RLU per factors/tratments.
+box1_fctr1 <- box1 %>%
+  filter(fctr == "control") %>%
+  group_by(treatment) %>%
+  summarise(count = n(), .groups = 'drop')
+
+print(box1_fctr1)
+
+box1_fctr2 <- box1 %>%
+  filter(fctr == "mutant") %>%
+  group_by(treatment) %>%
+  summarise(count = n(), .groups = 'drop')
+
+print(box1_fctr2)
+
+```
+
+
+############################################### 4. Ratio of RLU to baseline/background RLU################################
+
+```{r}
+##Creating 2 randomly generated tables (with fake Ca burst) for script testing: normal RLU and Baseline readings##
+set.seed(123)
+datarand <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(70, 75, 90, 120, 180, 250, 290, 240, 90, 85, 71)
+dfrand[8:20, 26:47] <- rep(wave_sequence, each = 1, length.out = 13) 
+dfrand <- as.data.frame(datarand)
+colnames(dfrand) <- 1:96
+rownames(dfrand) <- 1:60
+dfrand$Frame <- 1:60
+dfrand <- dfrand[, c("Frame", colnames(dfrand)[1:96])]
+head(dfrand)
+
+datarandBase <- matrix(runif(10*96, min = 50, max = 70), nrow = 10, ncol = 96)
+wave_sequence <- c(500, 552, 553, 560, 562, 563, 551, 549, 560, 545, 555)
+datarandBase[1:10, 1:48] <- matrix(rep(wave_sequence, length.out = 10 * 48), nrow = 10, ncol = 48)
+dfrandBase <- as.data.frame(datarandBase)
+colnames(dfrandBase) <- 1:96
+rownames(dfrandBase) <- 1:10
+dfrandBase$Frame <- 1:10
+dfrandBase <- dfrandBase[, c("Frame", colnames(dfrandBase)[1:96])]
+head(dfrandBase)
+```
+
+
+
+```{r}
+##Use this when you have data in two Excel files
+##Reading RLU experiment and baseline RLU Excel file directly from Varioskan Excel results
+##Assumes your Excel file is called "data"
+
+DFup <- "data.xlsx"
+DF1 <- read_excel(DFup, sheet = 2, skip = 9)
+DF1 <- DF1[,-2]
+DF1 <- DF1[,-98]
+DF1 <- DF1 %>%
+  slice(-c(82:86))
+colnames(DF1) <- c("Frame", 1:96)
+head(DF1)
+
+##Baseline data should have 10 Frames and the same number of columns(wells) as the main data above 
+
+DFupBase <- "data.xlsx"
+DF1base <- read_excel(DFupBase, sheet = 1, skip = 9)
+DF1base <- DF1base[,-2]
+DF1base <- DF1base[,-98]
+DF1base <- DF1base %>%
+  slice(-c(11:14))
+colnames(DF1base) <- c("Frame", 1:96)
+head(DF1base)
+```
+
+
+```{r}
+##Convert Photek dataframe to new organised dataframe
+##Change dataframe depending if you use the random dataset "dfrand" + dfrandBase or your own dataset from Excel.
+df_long <- pivot_longer(dfrand, 
+                        cols = -Frame,  
+                        names_to = "Well",  
+                        values_to = "RLU") 
+
+df_long <- df_long %>%
+  arrange(Well)
+
+df_longBase <- pivot_longer(dfrandBase, 
+                        cols = -Frame,  
+                        names_to = "Well",  
+                        values_to = "RLU")  
+ 
+df_longBase <- df_longBase %>%
+  arrange(Well)
+```
+
+```{r}
+#Assign variable names according to your experiment in "". 
+##factor variable can also be cell line, or plant species. Treatment is what you add to test and compare between gene/cell line/plant species. You can add or remove these variables
+
+fctr1 <- "control"
+fctr2 <- "mutant"
+
+treatment1 <- "mock"
+treatment2 <- "treatment"
+
+```
+
+```{r}
+##Step to add new columns for factor and Treatment variables
+##IMPORTANT: Adjust well ranges and factor/treatment to your experiment
+
+
+##Make factor column
+
+##Function to assign factor values based on well allocation (ranges)
+assign_factor <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(fctr = if_else(Well %in% start:end, value, fctr))
+  return(df)
+}
+
+df_long <- df_long %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_factor) {
+  df_long <- assign_factor(df_long, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+##Define a function to assign treatments based on well allocation (ranges)
+assign_treatment <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(treatment = if_else(Well %in% start:end, value, treatment))
+  return(df)
+}
+
+
+df_long <- df_long %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_treatment) {
+  df_long <- assign_treatment(df_long, i$start, i$end, i$value)
+}
+
+
+##Now the exact same for the baseline dataset
+
+
+##Make factor column
+
+
+
+df_longBase <- df_longBase %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+
+
+for (i in ranges_values_factor) {
+  df_longBase <- assign_factor(df_longBase, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+df_longBase <- df_longBase %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+
+
+for (i in ranges_values_treatment) {
+  df_longBase <- assign_treatment(df_longBase, i$start, i$end, i$value)
+}
+```
+
+```{r}
+####Organise data and calculate mean, sd, se, make two table one with baseline, then calculate RLU relative to baseline for each factor and treatment.
+
+##Group by factor, treatment, and frame. Then calculate the average, standard deviation, and standard error for each group
+data_summary <- df_long %>%
+  group_by(fctr, treatment, Frame) %>%
+  summarise(average_value = mean(RLU, na.rm = TRUE),
+            standard_deviation = sd(RLU, na.rm = TRUE),
+            Standard_error = sd(RLU, na.rm = TRUE) / sqrt(n())
+            )
+
+##Clean columns to remove any NA values
+data_summary <- data_summary[complete.cases(data_summary$fctr,data_summary$treatment),]
+
+
+##Calculating the average baseline value
+Baseline <- df_longBase %>%
+  group_by(fctr, treatment) %>%
+  summarise(average_value = mean(RLU, na.rm = TRUE)) %>%
+  rename(
+    RLUbase = average_value
+  )
+```
+```{r}
+## Convert Frame to factor to ensure proper ordering on the x-axis
+data_summary$fctr <- as.factor(data_summary$fctr)
+data_summary$treatment <- as.factor(data_summary$treatment)
+Baseline$fctr <- as.factor(Baseline$fctr)
+Baseline$treatment <- as.factor(Baseline$treatment)
+```
+
+
+```{r}
+
+##Now to make a new column in new data frame from df_long which becomes the L/Lmax 
+
+# Merge df_long with MaxDis based on factor and treatment
+merged_dfbase <- data_summary %>%
+  left_join(Baseline, by = c("fctr", "treatment")) 
+
+# Calculate the ratio of each RLU value to the maximum RLU value
+merged_dfbase <- merged_dfbase %>%
+  mutate(RLU_BaseRatio = average_value / RLUbase)
+
+
+# Group by factor, treatment, and Frame, then calculate the average for each group
+data_summary4 <- merged_dfbase %>%
+  group_by(fctr, treatment, Frame) %>%
+  summarise(RLU_BaseRatioAVG = mean(RLU_BaseRatio, na.rm = TRUE)
+            )
+```
+
+
+```{r}
+data_summary4$Frame <- as.factor(data_summary4$Frame)
+data_summary4$fctr <- as.factor(data_summary4$fctr)
+data_summary4$treatment <- as.factor(data_summary4$treatment)
+data_summary4 <- data_summary4[complete.cases(data_summary4$fctr,data_summary4$treatment),]
+```
+
+```{r}
+##Order the factor levels so they appear in order in the graph
+data_summary4$fctr <- factor(data_summary4$fctr, levels = c("control", "mutant"))
+  
+
+## Convert 'Frame' to numeric
+data_summary4$Frame <- as.numeric(as.character(data_summary4$Frame))
+
+## Plot
+plot <- ggplot(data_summary4, aes(x = Frame, y = RLU_BaseRatioAVG, color = treatment, group = treatment)) +
+  geom_point(size = 1.5) +  
+  geom_line() +  
+  scale_color_manual(values = setNames(c("#bcb8b1", "#00b4d8"), c(treatment1, treatment2))) + 
+  labs(x = "Time (min)", y = "Cytoplasmic calcium influx (RLU min-1)", color = "Treatment") +
+  ggtitle("Experiment Title") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.y = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 13),
+    axis.line = element_line(color = "black"),
+    plot.background = element_rect(fill = "white"),  
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11.5),  
+    panel.grid.major.x = element_line(color = "black", linetype = "dotted"), 
+    panel.grid.minor = element_blank()  
+  ) +
+    scale_x_continuous(
+      breaks = seq(0, max(data_summary4$Frame), by = 10),  
+      labels = function(x) x * 30 / 60,  # Convert frame number to minutes (If 1 frame = 30 seconds, change if not)
+      expand = c(0, 0)
+      ) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  facet_wrap(~ fctr, ncol = 2, nrow = 1) #Remove this line if only 1 factor
+
+
+ggsave("Baseline.png", plot, width = 6, height = 5, dpi = 300)
+
+```
+
+
+
+
+
+
+####################################### 5. L/Lmax calcium discharge graph#####################################
+
+```{r}
+##Creating an random table for script testing##
+set.seed(123)
+datarand <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(70, 75, 90, 120, 180, 250, 290, 240, 90, 85, 71)
+datarand[8:20, 26:47] <- rep(wave_sequence, each = 1, length.out = 13)  
+dfrand <- as.data.frame(datarand)
+colnames(dfrand) <- 1:96
+rownames(dfrand) <- 1:60
+dfrand$Frame <- 1:60
+dfrand <- dfrand[, c("Frame", colnames(dfrand)[1:96])]
+head(dfrand)
+
+##Discharge data set
+set.seed(123)
+dataranddis <- matrix(runif(60*96, min = 50, max = 70), nrow = 60, ncol = 96)
+wave_sequence <- c(170, 275, 490, 8120, 1180, 2250, 1290, 1240, 1090, 585, 671)
+wave_vector <- rep(wave_sequence, length.out = 12 * 48)
+dataranddis[2:13, 49:96] <- matrix(wave_vector, nrow = 12, ncol = 48, byrow = TRUE)
+dfranddis <- as.data.frame(dataranddis)
+colnames(dfranddis) <- 1:96
+rownames(dfranddis) <- 1:60
+dfranddis$Frame <- 1:60
+dfranddis <- dfranddis[, c("Frame", colnames(dfranddis)[1:96])]
+head(dfranddis)
+```
+
+```{r}
+##Reading Excel file directly from Varioskan Excel results
+##Label your Excel file "data"
+##If not from Varioskan output: data should start on 10th row with column headers (Frame, 1, 2, 3,...), then with data points (rows) until around 60 frames ( =< 60 >= ). Column headers can go to a maximum of 96 (=< 96).
+DFup <- "data.xlsx"
+DF1 <- read_excel(DFup, sheet = 2, skip = 9)
+DF1 <- DF1[,-2] 
+DF1 <- DF1[,-98] 
+DF1 <- DF1 %>%
+  slice(-c(82:86)) 
+colnames(DF1) <- c("Frame", 1:96) 
+head(DF1)
+
+
+##Now new data table with calcium discharge data (obtained separately)
+##If not from Varioskan output: discharge data should have the same number of column headers as main RLU data, but Frame (rows) can be anything (>= 2)
+DFupdis <- "datadis.xlsx"
+DF1dis <- read_excel(DFupdis, sheet = 3, skip = 9)
+DF1dis <- DF1dis[,-2] 
+DF1dis <- DF1dis[,-98] 
+DF1dis <- DF1dis %>%
+  slice(-c(82:86)) 
+colnames(DF1dis) <- c("Frame", 1:96) 
+head(DF1dis)
+```
+```{r}
+##Convert Photek dataframe to new organised dataframe
+##Change dataframe depending if you use the random dataset "dfranddis" or your own dataset from Excel "DF1".
+df_long <- pivot_longer(dfrand,
+                        cols = -Frame,  
+                        names_to = "Well",  
+                        values_to = "RLU") 
+
+df_long <- df_long %>%
+  arrange(Well)
+
+df_longdis <- pivot_longer(dfranddis,
+                        cols = -Frame,  
+                        names_to = "Well",  
+                        values_to = "RLU") 
+
+df_longdis <- df_longdis %>%
+  arrange(Well)
+```
+
+```{r}
+#Assign variable names according to your experiment in "". 
+##Factor variable can also be cell line, or plant species. Treatment is what you add to test and compare between gene/cell line/plant species. You can add or remove these variables
+
+fctr1 <- "control"
+fctr2 <- "mutant"
+
+treatment1 <- "mock"
+treatment2 <- "treatment"
+
+```
+
+```{r}
+##Step to add new columns for factor and Treatment variables
+##IMPORTANT: Adjust well ranges and factor/treatment to your experiment
+
+
+##Make factor column
+
+##Function to assign factor values based on well allocation (ranges)
+assign_factor <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(fctr = if_else(Well %in% start:end, value, fctr))
+  return(df)
+}
+
+df_long <- df_long %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_factor) {
+  df_long <- assign_factor(df_long, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+##Define a function to assign treatments based on well allocation (ranges)
+assign_treatment <- function(df, start, end, value) {
+  df <- df %>%
+    mutate(treatment = if_else(Well %in% start:end, value, treatment))
+  return(df)
+}
+
+
+df_long <- df_long %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+##lists assumes the plate reader read from well A1 to A12, then B12 TO B1... Change accordingly (well A1 = value 1).
+
+for (i in ranges_values_treatment) {
+  df_long <- assign_treatment(df_long, i$start, i$end, i$value)
+}
+
+
+##Same for discharge now
+##Make factor column
+
+
+df_longdis <- df_longdis %>%
+  mutate(fctr = NA_character_)
+
+##Define the ranges and corresponding values for factor
+ranges_values_factor <- list(
+  list(start = 1, end = 48, value = fctr1),
+  list(start = 49, end = 96, value = fctr2)
+)
+
+
+for (i in ranges_values_factor) {
+  df_longdis <- assign_factor(df_longdis, i$start, i$end, i$value)
+}
+
+
+##Make Treatment column
+
+
+df_longdis <- df_longdis %>%
+  mutate(treatment = NA_character_)
+
+##Define the ranges and corresponding values for treatment
+ranges_values_treatment <- list(
+  list(start = 1, end = 24, value = treatment1),
+  list(start = 25, end = 48, value = treatment2),
+  list(start = 49, end = 72, value = treatment1),
+  list(start = 73, end = 96, value = treatment2)
+)
+
+
+for (i in ranges_values_treatment) {
+  df_longdis <- assign_treatment(df_longdis, i$start, i$end, i$value)
+}
+
+```
+
+
+```{r}
+##Now making second table to get Max discharge for each factor and treatment
+# Group by factor and treatment, and select the highest value for RLU in each group
+MaxDis <- df_longdis %>%
+  group_by(fctr, treatment) %>%
+  slice_max(RLU) %>%
+  ungroup()
+
+##Clean columns:
+MaxDis <- MaxDis[complete.cases(MaxDis$fctr,MaxDis$treatment),]
+MaxDis <- MaxDis %>%
+  distinct(fctr, treatment, RLU)
+
+```
+
+```{r}
+######Check Max dis between factors####
+disOverview <- MaxDis %>%
+  group_by(fctr) %>%
+  summarise(average_value = mean(RLU, na.rm = TRUE),
+            standard_deviation = sd(RLU, na.rm = TRUE),
+            Standard_error = sd(RLU, na.rm = TRUE) / sqrt(n())
+            )
+head(disOverview)
+```
+
+```{r}
+###Now to make a new column in main RLU data df_long which becomes the L/Lmax 
+
+##Merge df_long with MaxDis based on factor and treatment
+merged_dfdis <- df_long %>%
+  left_join(MaxDis, by = c("fctr", "treatment"), suffix = c("", "_maxdis")) ## This is to specify the correct RLU column from each table
+
+##Calculate the ratio of each RLU value to the maximum RLU value
+merged_dfdis <- merged_dfdis %>%
+  mutate(RLU_ratio = RLU / RLU_maxdis)
+head(merged_dfdis)
+```
+
+
+```{r}
+##Organise data and calculate mean, sd, se. Then clean and check overall discharge ratio.
+##Group by factor, treatment, and Frame, then calculate the average for each group
+data_summarydis <- merged_dfdis %>%
+  group_by(fctr, treatment, Frame) %>%
+  summarise(average_value = mean(RLU_ratio, na.rm = TRUE),
+            standard_deviation = sd(RLU_ratio, na.rm = TRUE),
+            Standard_error = sd(RLU_ratio, na.rm = TRUE) / sqrt(n())
+            )
+
+data_summary$Frame <- as.numeric(as.character(data_summary$Frame))
+data_summarydis$fctr <- as.factor(data_summarydis$fctr)
+data_summarydis$treatment <- as.factor(data_summarydis$treatment)
+
+##Clean columns
+data_summarydis <- data_summarydis[complete.cases(data_summarydis$fctr,data_summarydis$treatment),]
+
+##Check Max dis between factors
+disOverviewRatio <- data_summarydis %>%
+  group_by(fctr) %>%
+  summarise(average_value = mean(average_value, na.rm = TRUE)
+            )
+head(disOverviewRatio)
+
+
+```
+
+```{r}
+##Graph
+##Convert 'Frame' to numeric
+data_summarydis$fctr <- factor(data_summarydis$fctr, levels = c("control", "mutant"))
+data_summarydis$Frame <- as.numeric(data_summarydis$Frame)  
+
+##Plot 
+plot <- ggplot(data_summarydis, aes(x = Frame, y = average_value, color = treatment, group = treatment)) +
+  geom_point(size = 1.5) +  
+  geom_line() +  
+  geom_errorbar(aes(ymin = average_value - Standard_error, ymax = average_value + Standard_error), width = 0.1) +  
+  scale_color_manual(values = setNames(c("#bcb8b1", "#00b4d8"), c(treatment1, treatment2))) +  # Customize colors using hex code
+  labs(x = "Time (min)", y = "Cytoplasmic calcium influx (RLU min-1)", color = "Treatment") +
+  ggtitle("Experiment Title") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.y = element_text(size = 13),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 13),
+    axis.line = element_line(color = "black"),
+    plot.background = element_rect(fill = "white"),  
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11.5),  
+    panel.grid.major.x = element_line(color = "black", linetype = "dotted"), 
+    panel.grid.minor = element_blank()  
+  ) +
+    scale_x_continuous(
+      breaks = seq(0, max(data_summarydis$Frame), by = 10),  
+      labels = function(x) x * 30 / 60,  # Convert frame number to minutes (If 1 frame = 30 seconds, change if not)
+      expand = c(0, 0)
+      ) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  facet_wrap(~ fctr, ncol = 2, nrow = 1) #Remove this line if only 1 factor
+
+ggsave("LLmax.png", plot, width = 6, height = 5, dpi = 300)
+
+
+```
+
+
+
+
+
+
+
